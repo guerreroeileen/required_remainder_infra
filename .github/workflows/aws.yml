@@ -24,3 +24,10 @@ jobs:
           --template-file cloudformation/frontend.yaml \
           --stack-name required-remainder-frontend \
           --capabilities CAPABILITY_NAMED_IAM
+
+    - name: Deploy backend infra
+      run: |
+        aws cloudformation deploy \
+          --template-file cloudformation/backend.yaml \
+          --stack-name required-remainder-backend \
+          --capabilities CAPABILITY_NAMED_IAM
