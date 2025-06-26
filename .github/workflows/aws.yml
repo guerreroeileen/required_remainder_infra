@@ -6,10 +6,14 @@ on:
 jobs:
   deploy-infra:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
+
+    - name: Set image tag
+      run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -18,16 +22,45 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: us-east-1
 
+    - name: Validate CloudFormation templates
+      run: |
+        aws cloudformation validate-template --template-body file://cloudformation/frontend.yaml
+        aws cloudformation validate-template --template-body file://cloudformation/backend.yaml
+
     - name: Deploy frontend infra
       run: |
         aws cloudformation deploy \
           --template-file cloudformation/frontend.yaml \
           --stack-name required-remainder-frontend \
-          --capabilities CAPABILITY_NAMED_IAM
+          --capabilities CAPABILITY_NAMED_IAM \
+          --parameter-overrides Environment=dev
 
     - name: Deploy backend infra
       run: |
         aws cloudformation deploy \
           --template-file cloudformation/backend.yaml \
           --stack-name required-remainder-backend \
-          --capabilities CAPABILITY_NAMED_IAM
+          --capabilities CAPABILITY_NAMED_IAM \
+          --parameter-overrides \
+            Environment=dev \
+            ECRRepositoryName=required-remainder-backend
+
+    - name: Get ECR repository URI
+      id: ecr-uri
+      run: |
+        ECR_URI=$(aws cloudformation describe-stacks \
+          --stack-name required-remainder-backend \
+          --query 'Stacks[0].Outputs[?OutputKey==`ECRRepoUri`].OutputValue' \
+          --output text)
+        echo "ECR Repository URI: $ECR_URI"
+        echo "ecr_uri=$ECR_URI" >> $GITHUB_OUTPUT
+
+    - name: Get stack outputs
+      run: |
+        echo "Frontend Stack Outputs:"
+        aws cloudformation describe-stacks --stack-name required-remainder-frontend --query 'Stacks[0].Outputs'
+        echo "Backend Stack Outputs:"
+        aws cloudformation describe-stacks --stack-name required-remainder-backend --query 'Stacks[0].Outputs'
+        echo ""
+        echo "✅ Infrastructure deployed successfully!"
+        echo "🎯 Next step: Push to backend repository to deploy your application"

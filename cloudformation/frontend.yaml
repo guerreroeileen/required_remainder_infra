@@ -45,6 +45,10 @@ Resources:
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD]
           CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
         DefaultRootObject: index.html
         ViewerCertificate:
           CloudFrontDefaultCertificate: true

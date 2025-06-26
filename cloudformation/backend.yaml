@@ -1,29 +1,50 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Secure Backend Spring Boot infra with ECS Fargate, ECR, VPC, private subnets and internal ALB
+Description: Backend Spring Boot infra with Elastic Beanstalk, ECR, VPC, and ALB
 
 Parameters:
   ContainerImage:
     Type: String
     Description: Docker image URI to deploy
+    Default: nginx:alpine
+  ECRRepositoryName:
+    Type: String
+    Default: required-remainder-backend
   VpcCIDR:
     Type: String
     Default: 10.0.0.0/16
-
-  PrivateSubnet1CIDR:
+  PublicSubnetCIDR:
     Type: String
     Default: 10.0.1.0/24
-
-  PrivateSubnet2CIDR:
+  PublicSubnet2CIDR:
     Type: String
     Default: 10.0.2.0/24
-
   ContainerPort:
     Type: Number
     Default: 8080
+  DeployService:
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+  Environment:
+    Type: String
+    Description: Environment (dev, staging, prod)
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: EC2 instance type for Elastic Beanstalk
+  MinSize:
+    Type: Number
+    Default: 1
+    Description: Minimum number of instances
+  MaxSize:
+    Type: Number
+    Default: 2
+    Description: Maximum number of instances
 
 Resources:
 
-  ### VPC and Networking ###
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -34,76 +55,87 @@ Resources:
         - Key: Name
           Value: required-remainder-vpc
 
-  PrivateSubnet1:
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Ref PrivateSubnet1CIDR
+      CidrBlock: !Ref PublicSubnetCIDR
       AvailabilityZone: !Select [ 0, !GetAZs ]
-      MapPublicIpOnLaunch: false
+      MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: required-remainder-private-subnet-1
+          Value: required-remainder-public-subnet-1
 
-  PrivateSubnet2:
+  PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Ref PrivateSubnet2CIDR
+      CidrBlock: !Ref PublicSubnet2CIDR
       AvailabilityZone: !Select [ 1, !GetAZs ]
-      MapPublicIpOnLaunch: false
+      MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: required-remainder-private-subnet-2
+          Value: required-remainder-public-subnet-2
 
-  NatGatewayEIP:
-    Type: AWS::EC2::EIP
-    Properties:
-      Domain: vpc
-
-  NatGateway:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt NatGatewayEIP.AllocationId
-      SubnetId: !Ref PrivateSubnet1
-
-  PrivateRouteTable:
+  PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
 
-  PrivateRoute:
+  PublicRoute:
     Type: AWS::EC2::Route
     Properties:
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway
+      GatewayId: !Ref InternetGateway
 
-  SubnetRouteTableAssociation1:
+  PublicSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref PrivateSubnet1
-      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
 
-  SubnetRouteTableAssociation2:
+  PublicSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref PrivateSubnet2
-      RouteTableId: !Ref PrivateRouteTable
-
-  ### ECR and ECS ###
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
 
   ECRRepository:
     Type: AWS::ECR::Repository
     Properties:
       RepositoryName: !Ref ECRRepositoryName
+      ImageScanningConfiguration:
+        ScanOnPush: false
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only 2 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 2
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
 
-  ECSCluster:
-    Type: AWS::ECS::Cluster
-    Properties:
-      ClusterName: required-remainder-cluster
-
-  TaskExecutionRole:
+  ElasticBeanstalkServiceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -111,107 +143,86 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: ecs-tasks.amazonaws.com
+              Service: elasticbeanstalk.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService
 
-  TaskDefinition:
-    Type: AWS::ECS::TaskDefinition
+  ElasticBeanstalkEC2Role:
+    Type: AWS::IAM::Role
     Properties:
-      Family: required-remainder-task
-      RequiresCompatibilities: [FARGATE]
-      Cpu: 512
-      Memory: 1024
-      NetworkMode: awsvpc
-      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
-      ContainerDefinitions:
-        - Name: required-remainder-container
-          Image: !Ref ContainerImage
-          PortMappings:
-            - ContainerPort: !Ref ContainerPort
+      RoleName: aws-elasticbeanstalk-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
 
-  ServiceSecurityGroup:
+  ElasticBeanstalkInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: aws-elasticbeanstalk-ec2-role
+      Roles:
+        - !Ref ElasticBeanstalkEC2Role
+
+  ElasticBeanstalkSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow internal access to backend from ALB
+      GroupName: ElasticBeanstalkSecurityGroup
+      GroupDescription: Security group for Elastic Beanstalk environment
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort
-          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
 
-  ALBSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+  ElasticBeanstalkApplication:
+    Type: AWS::ElasticBeanstalk::Application
     Properties:
-      GroupDescription: Allow only frontend access
-      VpcId: !Ref VPC
+      ApplicationName: required-remainder-backend
+      Description: Required Remainder Backend Application
 
-  LoadBalancer:
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      Name: required-remainder-alb
-      Scheme: internal
-      Subnets:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
-      SecurityGroups:
-        - !Ref ALBSecurityGroup
-      Type: application
 
-  TargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: required-remainder-tg
-      Port: !Ref ContainerPort
-      Protocol: HTTP
-      VpcId: !Ref VPC
-      TargetType: ip
-      HealthCheckPath: /
 
-  Listener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref TargetGroup
-      LoadBalancerArn: !Ref LoadBalancer
-      Port: 80
-      Protocol: HTTP
 
-  ECSService:
-    Type: AWS::ECS::Service
-    Properties:
-      Cluster: !Ref ECSCluster
-      LaunchType: FARGATE
-      DesiredCount: 1
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          Subnets:
-            - !Ref PrivateSubnet1
-            - !Ref PrivateSubnet2
-          SecurityGroups:
-            - !Ref ServiceSecurityGroup
-          AssignPublicIp: DISABLED
-      TaskDefinition: !Ref TaskDefinition
-      LoadBalancers:
-        - TargetGroupArn: !Ref TargetGroup
-          ContainerName: required-remainder-container
-          ContainerPort: !Ref ContainerPort
+Conditions:
+  DeployServiceCondition: !Equals [!Ref DeployService, 'true']
 
 Outputs:
   VPCId:
     Value: !Ref VPC
-
-  ECSClusterName:
-    Value: !Ref ECSCluster
+    Export:
+      Name: RequiredRemainderVPCId
 
   ECRRepoUri:
     Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: RequiredRemainderECRRepo
 
-  TaskExecutionRoleArn:
-    Value: !GetAtt TaskExecutionRole.Arn
+  ElasticBeanstalkApplicationName:
+    Value: !Ref ElasticBeanstalkApplication
+    Export:
+      Name: RequiredRemainderEBApplication
 
-  LoadBalancerDNS:
-    Value: !GetAtt LoadBalancer.DNSName
+  ElasticBeanstalkSecurityGroupId:
+    Value: !Ref ElasticBeanstalkSecurityGroup
+    Export:
+      Name: RequiredRemainderEBSecurityGroup
+
+
